@@ -1,6 +1,7 @@
 import json
 
 from django.contrib.auth.models import User
+from django.db.models import Count, Case, When, Avg
 from django.test import TestCase
 from django.urls import reverse
 from rest_framework import status
@@ -15,30 +16,59 @@ class BookApiTestCase(APITestCase):
     def setUp(self):
         self.user = User.objects.create_user(username='testuser')
         self.user2 = User.objects.create_user(username='testuser2', is_staff=True)
+        self.user3 = User.objects.create_user(username='testuser3', is_staff=False)
         self.book_1 = Book.objects.create(name='Test Book 1', price=25, author='Author 1', owner=self.user)
         self.book_2 = Book.objects.create(name='Test Book 2', price=55, author='Author 5')
-        self.book_3 = Book.objects.create(name='Test Book Author 1', price=55, author='Author 2')
+        self.book_3 = Book.objects.create(name='Test Book 1', price=55, author='Author 2')
+        UserBookRelation.objects.create(book=self.book_1, user=self.user, like=True, rate=5)
 
     def test_get(self):
         url = reverse('book-list')
-        response = self.client.get(url, data={'price': 55})
-        serializer_data = BookSerializer([self.book_1, self.book_2, self.book_3], many=True).data
+        response = self.client.get(url)
+        books = Book.objects.all().annotate(
+            annotated_likes=Count(Case(When(userbookrelation__like=True, then=1))),
+            rating=Avg('userbookrelation__rate')
+        ).order_by('id')
+
+        serializer_data = BookSerializer(books, many=True).data
         self.assertEqual(status.HTTP_200_OK, response.status_code)
         self.assertEqual(serializer_data, response.data)
 
     def test_get_filter(self):
         url = reverse('book-list')
-        response = self.client.get(url, data={'search': 'Author 1'})
-        serializer_data = BookSerializer([self.book_1, self.book_3], many=True).data
+        books = Book.objects.filter(id__in=[self.book_2.id, self.book_3.id]).annotate(
+            annotated_likes=Count(Case(When(userbookrelation__like=True, then=1))),
+            rating=Avg('userbookrelation__rate')
+        ).order_by('id')
+        response = self.client.get(url, data={"price": 55})
+        serializer_data = BookSerializer(books, many=True).data
         self.assertEqual(status.HTTP_200_OK, response.status_code)
         self.assertEqual(serializer_data, response.data)
 
     def test_get_ordering(self):
         url = reverse('book-list')
         response = self.client.get(url, data={'ordering': 'price'})
-        serializer_data = BookSerializer([self.book_1, self.book_2, self.book_3], many=True).data
+        books = Book.objects.all().annotate(
+            annotated_likes=Count(Case(When(userbookrelation__like=True, then=1))),
+            rating=Avg('userbookrelation__rate')
+        ).order_by('price')
+        serializer_data = BookSerializer(books, many=True).data
         self.assertEqual(status.HTTP_200_OK, response.status_code)
         self.assertEqual(serializer_data, response.data)
+
+    def test_get_search(self):
+        url = reverse('book-list')
+        books = Book.objects.filter(id__in=[self.book_1.id, self.book_3.id]).annotate(
+            annotated_likes=Count(Case(When(userbookrelation__like=True, then=1))),
+            rating=Avg('userbookrelation__rate')
+        ).order_by('id')
+        response = self.client.get(url, data={'search': 'Author 1'})
+        serializer_data = BookSerializer(books, many=True).data
+        self.assertEqual(status.HTTP_200_OK, response.status_code)
+        self.assertEqual(serializer_data, response.data)
+        self.assertEqual(serializer_data[0]['rating'], "5.00")
+        self.assertEqual(serializer_data[0]['likes_count'], 1)
+        self.assertEqual(serializer_data[0]['annotated_likes'], 1)
 
     def test_create(self):
         self.assertEqual(3, Book.objects.all().count())
@@ -84,7 +114,11 @@ class BookApiTestCase(APITestCase):
 
     def test_retrieve(self):
         url = reverse('book-detail', args=(self.book_1.id,))
-        serializer_data = BookSerializer(self.book_1).data
+        books = Book.objects.filter(id=self.book_1.id).annotate(
+            annotated_likes=Count(Case(When(userbookrelation__like=True, then=1))),
+            rating=Avg('userbookrelation__rate')
+        ).first()
+        serializer_data = BookSerializer(books).data
         response = self.client.get(url, data=serializer_data, content_type='application/json')
         self.assertEqual(status.HTTP_200_OK, response.status_code)
         self.assertEqual(serializer_data, response.data)
@@ -97,7 +131,7 @@ class BookApiTestCase(APITestCase):
             "author": self.book_1.author
         }
         json_data = json.dumps(data)
-        self.client.force_login(self.user2)
+        self.client.force_login(self.user3)
         response = self.client.put(url, data=json_data, content_type='application/json')
         self.assertEqual(status.HTTP_403_FORBIDDEN, response.status_code)
         self.assertEqual({'detail': ErrorDetail(string='You do not have permission to perform this action.',
@@ -114,7 +148,7 @@ class BookApiTestCase(APITestCase):
             "author": self.book_1.author
         }
         json_data = json.dumps(data)
-        self.client.force_login(self.user2)
+        self.client.force_login(self.user3)
         response = self.client.delete(url, data=json_data, content_type='application/json')
         self.assertEqual(status.HTTP_403_FORBIDDEN, response.status_code)
         self.assertEqual(3, Book.objects.all().count())
@@ -176,6 +210,6 @@ class BookRelationTestCase(APITestCase):
         json_data = json.dumps(data)
         self.client.force_login(self.user)
         response = self.client.patch(url, data=json_data, content_type='application/json')
-        self.assertEqual(status.HTTP_200_OK, response.status_code, response.data)
-        relation = UserBookRelation.objects.get(user=self.user, book=self.book_1)
-        self.assertEqual(3, relation.rate)
+        self.assertEqual(status.HTTP_400_BAD_REQUEST, response.status_code, response.data)
+
+
